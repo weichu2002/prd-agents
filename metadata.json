@@ -1,0 +1,5 @@
+{
+  "name": "PRD-Agents",
+  "description": "AI-driven collaborative PRD platform with consensus engine, deployed on Aliyun ESA.",
+  "requestFramePermissions": []
+}
