@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Bot, FileText, Database, Share2, Link as LinkIcon, Users, FileUp, User, MessageSquarePlus, Lock, Unlock, LogOut, Settings, Quote, X, Plus, CheckCircle, Trash2, Download, ChevronDown, Network, Wand2, Loader2, Pencil, Check } from 'lucide-react';
+import { Bot, FileText, Database, Share2, Link as LinkIcon, Users, FileUp, User, MessageSquarePlus, Lock, Unlock, LogOut, Settings, Quote, X, Plus, CheckCircle, Trash2, Download, ChevronDown, Network, Wand2, Loader2, Pencil, Check, RefreshCw } from 'lucide-react';
 import PRDEditor from './components/Editor';
 import DecisionWidget from './components/DecisionWidget';
 import ImpactGraph from './components/ImpactGraph';
@@ -21,9 +21,10 @@ function App() {
   const [decisions, setDecisions] = useState<{ [key: string]: DecisionData }>({});
   const [impactGraph, setImpactGraph] = useState<ImpactData>({ nodes: [], links: [] });
   
-  // Refs for State Consistency (Fixing Polling Stale Closures)
+  // Refs for State Consistency
   const contentRef = useRef('');
   const lastEditedAtRef = useRef(0);
+  const skipNextPollRef = useRef(false); // Optimization: Skip poll after immediate update
   useEffect(() => { contentRef.current = content; }, [content]);
 
   // Room & Identity
@@ -44,6 +45,7 @@ function App() {
   const [isImporting, setIsImporting] = useState(false);
   const [isKBUploading, setIsKBUploading] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [isGeneratingGraph, setIsGeneratingGraph] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const editorRef = useRef<any>(null);
@@ -105,7 +107,6 @@ function App() {
           if (isCreate) {
               const settingsToUse = initialSettings || { allowGuestEdit: false, allowGuestComment: true, isActive: true, status: 'DRAFT' };
               setRoomSettings(settingsToUse);
-              // Init DB with default content
               await pushRoomUpdate(id, { 
                 content: LINGJING_PRD_CONTENT,
                 comments: [],
@@ -120,12 +121,20 @@ function App() {
           setRole('GUEST');
       }
       
-      await fetchState(id, true); // Force update on init
+      await fetchState(id, true);
       setLoadingRoom(false);
   };
 
   const fetchState = async (id: string = roomId, force = false) => {
       if (!id) return;
+
+      // Optimization: Skip poll if we just pushed an update to prevent stale read
+      if (skipNextPollRef.current && !force) {
+          // If a minute has passed since the skip was set, force reset it just in case
+          // But usually the timeout in pushRoomUpdate handles this.
+          return;
+      }
+
       setIsSyncing(true);
       try {
           const res = await fetch(`/api/room/sync?roomId=${id}`);
@@ -138,20 +147,23 @@ function App() {
                   return;
               }
               
-              // Smart Content Sync: Only update if server content differs AND user hasn't typed recently
-              // Unless it's a force sync (initial load)
+              const state = data.state;
+
+              // 1. Content Sync: only if user is idle or force sync
               const timeSinceEdit = Date.now() - lastEditedAtRef.current;
-              if (data.state.content !== contentRef.current) {
-                  if (force || timeSinceEdit > 3000) {
-                      setContent(data.state.content);
+              if (state.content !== contentRef.current) {
+                  if (force || timeSinceEdit > 5000) {
+                      setContent(state.content);
                   }
               }
 
-              if (data.state.comments) setComments(data.state.comments);
-              if (data.state.settings) setRoomSettings(data.state.settings);
-              if (data.state.kbFiles) setKbFiles(data.state.kbFiles);
-              if (data.state.decisions) setDecisions(data.state.decisions);
-              if (data.state.impactGraph) setImpactGraph(data.state.impactGraph);
+              // 2. Data Sync: Always update these to ensure real-time feel for votes/comments
+              // We compare JSON string to avoid unnecessary re-renders if possible, but React handles that mostly.
+              if (state.comments) setComments(state.comments);
+              if (state.settings) setRoomSettings(state.settings);
+              if (state.kbFiles) setKbFiles(state.kbFiles);
+              if (state.decisions) setDecisions(state.decisions);
+              if (state.impactGraph) setImpactGraph(state.impactGraph);
           }
       } catch (e) {
           console.error("Sync error", e);
@@ -187,26 +199,49 @@ function App() {
   // --- Periodic Sync ---
   useEffect(() => {
       if (view !== 'WORKSPACE' || !roomId) return;
-      const interval = setInterval(() => fetchState(roomId), 2000); // Faster polling for better feel
+      // Poll every 1.5s for better "real-time" feel
+      const interval = setInterval(() => fetchState(roomId), 1500); 
       return () => clearInterval(interval);
   }, [roomId, view]); 
 
   const pushRoomUpdate = async (rId: string, updates: any, uRole: string) => {
+      setIsSaving(true);
       try {
-          await fetch('/api/room/update', {
+          const res = await fetch('/api/room/update', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ roomId: rId, updates, userRole: uRole })
           });
+          
+          const data = await res.json();
+          if (data.success && data.state) {
+              // Immediate sync from write response
+              const state = data.state;
+              
+              // Skip next polling to prevent jitter
+              skipNextPollRef.current = true;
+              // Reset flag after 2 seconds (covering standard poll interval)
+              setTimeout(() => { skipNextPollRef.current = false; }, 2000);
+
+              // Update local state with authoritative server state
+              if (state.content !== undefined && state.content !== content) setContent(state.content);
+              if (state.comments) setComments(state.comments);
+              if (state.decisions) setDecisions(state.decisions);
+              if (state.kbFiles) setKbFiles(state.kbFiles);
+              if (state.impactGraph) setImpactGraph(state.impactGraph);
+              if (state.settings) setRoomSettings(state.settings);
+          }
       } catch (e) {
           console.error("Push update failed", e);
+      } finally {
+          setTimeout(() => setIsSaving(false), 500);
       }
   };
 
   const handleContentChange = (newVal: string | undefined) => {
       const val = newVal || '';
       setContent(val);
-      lastEditedAtRef.current = Date.now(); // Update timestamp
+      lastEditedAtRef.current = Date.now();
       
       if (roomSettings.status === 'APPROVED') return;
       if (role === 'OWNER' || roomSettings.allowGuestEdit) {
@@ -216,7 +251,7 @@ function App() {
 
   // --- Voting Logic ---
   const handleVote = async (index: number, question: string, options: string[]) => {
-      const anchorKey = question; 
+      const anchorKey = question.trim();
       try {
           const res = await fetch('/api/vote', {
               method: 'POST',
@@ -225,10 +260,16 @@ function App() {
           });
           const data = await res.json();
           if (data.success) {
+              // Optimistic update
               setDecisions(prev => ({ ...prev, [anchorKey]: data.decision }));
+              // Force sync immediately to confirm
+              setTimeout(() => fetchState(roomId, true), 100);
+          } else {
+             alert("投票失败: " + data.error);
           }
       } catch (e) {
-          console.error("Vote failed", e);
+          console.error("Vote network failed", e);
+          alert("网络错误");
       }
   };
 
@@ -246,12 +287,17 @@ function App() {
       const newComments = data.comments.map((c: any) => ({
           ...c, id: uuidv4(), author: 'AI 评审副驾', timestamp: Date.now()
       }));
+      
+      // Optimistic update (for immediate feedback)
       const merged = [...comments, ...newComments];
       setComments(merged);
-      pushRoomUpdate(roomId, { comments: merged }, role);
+      
+      // Use atomic append
+      pushRoomUpdate(roomId, { newComments: newComments }, role);
+      
       setActiveTab('EDITOR');
     } catch (error) {
-      alert("AI 服务繁忙");
+      alert("AI 服务繁忙，请稍后重试");
     } finally {
       setIsReviewing(false);
     }
@@ -271,6 +317,8 @@ function App() {
           if (data.impactGraph) {
               setImpactGraph(data.impactGraph);
               pushRoomUpdate(roomId, { impactGraph: data.impactGraph }, role);
+          } else if (data.error) {
+              alert("分析失败: " + data.error);
           }
       } catch (e) {
           alert("生成图谱失败");
@@ -282,7 +330,6 @@ function App() {
   const handleAddManualNode = () => {
       if (!newNodeName.trim()) return;
       const newNode = { id: newNodeName, group: 1, val: 10 };
-      // Prevent duplicates
       if (impactGraph.nodes.find(n => n.id === newNode.id)) return;
       
       const newGraph = {
@@ -295,7 +342,7 @@ function App() {
   };
 
   const handleDeleteNode = (nodeId: string) => {
-      if (role !== 'OWNER') return; // Only owner can delete for now
+      if (role !== 'OWNER') return; 
       const newNodes = impactGraph.nodes.filter(n => n.id !== nodeId);
       const newLinks = impactGraph.links.filter(l => l.source !== nodeId && l.target !== nodeId);
       const newGraph = { nodes: newNodes, links: newLinks };
@@ -351,11 +398,15 @@ function App() {
           originalText: quotedText || 'User Comment', comment: newComment, author: username || (role === 'OWNER' ? '房主' : '匿名用户'),
           timestamp: Date.now()
       };
+      
+      // Optimistic update
       const updated = [...comments, comment];
       setComments(updated);
       setNewComment('');
       setQuotedText('');
-      pushRoomUpdate(roomId, { comments: updated }, role);
+      
+      // Use Atomic Append
+      pushRoomUpdate(roomId, { newComment: comment }, role);
   };
 
   const captureSelection = () => {
@@ -381,7 +432,7 @@ function App() {
       // Strict frontend guard
       const isOwner = role === 'OWNER';
       const isAuthor = comment.author === (username || (isOwner ? '房主' : '匿名用户'));
-      if (comment.type !== 'HUMAN' && !isOwner) return; // Only owner can maybe delete AI comments? Requirement says "For AI comments, disabled". But Owner might need to clean up. Adhering to prompt: Disabled for AI.
+      if (comment.type !== 'HUMAN' && !isOwner) return; 
       if (comment.type !== 'HUMAN') return; 
       if (!isOwner && !isAuthor) return;
 
@@ -400,11 +451,10 @@ function App() {
       const comment = comments.find(c => c.id === commentId);
       if (!comment) return;
 
-      // Strict frontend guard
       const isOwner = role === 'OWNER';
       const isAuthor = comment.author === (username || (isOwner ? '房主' : '匿名用户'));
       if (comment.type !== 'HUMAN') return;
-      if (!isAuthor) return; // Only author can edit
+      if (!isAuthor) return; 
 
       if (!editCommentText.trim()) return;
       const updatedComments = comments.map(c => {
@@ -482,9 +532,29 @@ function App() {
                 </div>
                 <h1 className="font-semibold text-gray-700 truncate">{DEMO_PROJECT_NAME}</h1>
             </div>
-            <div className="flex gap-3">
-                 <button onClick={() => {navigator.clipboard.writeText(window.location.href); alert("Copied!")}} className="flex items-center gap-2 text-gray-600 hover:text-aliyun text-sm"><LinkIcon className="w-4 h-4"/> 邀请</button>
-                 {role === 'OWNER' && <button onClick={handleAIReview} disabled={isReviewing} className="flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded text-sm font-medium">{isReviewing ? 'AI 思考中...' : 'AI 评审'}</button>}
+            
+            {/* Sync Status Indicator */}
+            <div className="flex items-center gap-4">
+                 <div className="flex items-center gap-1.5 text-xs font-medium">
+                    {isSaving || isSyncing ? (
+                        <>
+                            <RefreshCw className="w-3 h-3 animate-spin text-aliyun" />
+                            <span className="text-gray-500">同步中...</span>
+                        </>
+                    ) : (
+                        <>
+                            <CheckCircle className="w-3 h-3 text-green-500" />
+                            <span className="text-gray-400">已同步</span>
+                        </>
+                    )}
+                 </div>
+
+                 <div className="h-4 w-px bg-gray-200"></div>
+
+                 <div className="flex gap-3">
+                     <button onClick={() => {navigator.clipboard.writeText(window.location.href); alert("Copied!")}} className="flex items-center gap-2 text-gray-600 hover:text-aliyun text-sm"><LinkIcon className="w-4 h-4"/> 邀请</button>
+                     {role === 'OWNER' && <button onClick={handleAIReview} disabled={isReviewing} className="flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded text-sm font-medium">{isReviewing ? 'AI 思考中...' : 'AI 评审'}</button>}
+                </div>
             </div>
         </header>
 

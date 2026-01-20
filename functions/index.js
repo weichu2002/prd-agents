@@ -8,6 +8,7 @@ import { EdgeKV } from '@aliyun/esa-kv';
 
 // Configuration
 const API_KEY = "sk-26d09fa903034902928ae380a56ecfd3"; 
+// 使用兼容模式 Endpoint
 const DASHSCOPE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 
 function corsResponse(data, status = 200) {
@@ -24,9 +25,6 @@ function corsResponse(data, status = 200) {
 
 // --- Persistence Helpers ---
 async function getRoomState(roomId) {
-    // CRITICAL FIX: Removed in-memory GLOBAL_ROOM_STORE cache.
-    // Edge functions run on different nodes; local cache causes split-brain state.
-    // Always read from KV to ensure consistency for new members.
     try {
         const kv = new EdgeKV({ namespace: "prd-kv" });
         const data = await kv.get(`room:${roomId}`, { type: "json" });
@@ -47,6 +45,45 @@ async function saveRoomState(roomId, state) {
     return state;
 }
 
+// --- AI Helper ---
+async function callAI(messages, model = "deepseek-v3") {
+    try {
+        // DeepSeek V3 in DashScope might need specific parameters or fail on high load
+        // We set a timeout to fail fast
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000); // Increased timeout to 25s
+
+        const payload = {
+            model: model,
+            messages: messages,
+            temperature: 0.3
+        };
+
+        const response = await fetch(DASHSCOPE_URL, {
+            method: "POST",
+            headers: { 
+                "Authorization": `Bearer ${API_KEY}`, 
+                "Content-Type": "application/json" 
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`API Error: ${response.status} - ${errText}`);
+        }
+
+        const result = await response.json();
+        return result.choices[0].message.content;
+    } catch (e) {
+        console.warn(`AI Call Failed (${model}):`, e.message);
+        throw e;
+    }
+}
+
 // --- Handlers ---
 
 async function handleRoomSync(request, url) {
@@ -60,74 +97,102 @@ async function handleRoomSync(request, url) {
 }
 
 async function handleRoomUpdate(request) {
-    const { roomId, updates, userRole } = await request.json();
-    let state = await getRoomState(roomId);
-    
-    // Initialize if new (first save)
-    if (!state) {
-        state = {
-            roomId,
-            content: updates.content || "",
-            comments: [],
-            kbFiles: updates.kbFiles || [],
-            settings: { allowGuestEdit: false, allowGuestComment: false, isActive: true, status: 'DRAFT' },
-            decisions: {},
-            impactGraph: { nodes: [], links: [] },
-            version: 1,
-            lastUpdated: Date.now()
-        };
-    } else {
-        // Strict Permission Check for Content Updates
-        if (userRole !== 'OWNER' && !state.settings.allowGuestEdit && updates.content) {
-            return corsResponse({ error: "Permission Denied: Guest editing is disabled." }, 403);
+    try {
+        const { roomId, updates, userRole } = await request.json();
+        let state = await getRoomState(roomId);
+        
+        // Initialize if new (first save)
+        if (!state) {
+            state = {
+                roomId,
+                content: updates.content || "",
+                comments: [],
+                kbFiles: updates.kbFiles || [],
+                settings: { allowGuestEdit: false, allowGuestComment: false, isActive: true, status: 'DRAFT' },
+                decisions: {},
+                impactGraph: { nodes: [], links: [] },
+                version: 1,
+                lastUpdated: Date.now()
+            };
+        } else {
+            if (userRole !== 'OWNER' && !state.settings.allowGuestEdit && updates.content) {
+                return corsResponse({ error: "Permission Denied: Guest editing is disabled." }, 403);
+            }
+            if (userRole !== 'OWNER' && !state.settings.allowGuestComment && (updates.comments || updates.newComment || updates.newComments)) {
+                return corsResponse({ error: "Permission Denied: Guest commenting is disabled." }, 403);
+            }
+        }
+
+        // Apply Updates
+        if (updates.content !== undefined) state.content = updates.content;
+        if (updates.kbFiles !== undefined) state.kbFiles = updates.kbFiles;
+        if (updates.decisions !== undefined) state.decisions = updates.decisions;
+        if (updates.impactGraph !== undefined) state.impactGraph = updates.impactGraph;
+        if (updates.settings !== undefined && userRole === 'OWNER') state.settings = { ...state.settings, ...updates.settings };
+
+        // Comment Handling: Prioritize APPEND over REPLACE for concurrency
+        if (!state.comments) state.comments = [];
+        
+        if (updates.newComment) {
+            // Atomic append for a single comment
+            state.comments.push(updates.newComment);
+        } else if (updates.newComments) {
+            // Atomic append for multiple comments (e.g., AI batch)
+            state.comments.push(...updates.newComments);
+        } else if (updates.comments !== undefined) {
+            // Full replace (fallback or deletion/edit)
+            state.comments = updates.comments;
         }
         
-        // Strict Permission Check for Comment Updates (Prevents guests from modifying comments if disabled)
-        // Note: For finer-grained control (user A deleting user B's comment), we rely on frontend logic 
-        // combined with this gatekeeper.
-        if (userRole !== 'OWNER' && !state.settings.allowGuestComment && updates.comments) {
-            return corsResponse({ error: "Permission Denied: Guest commenting is disabled." }, 403);
-        }
+        state.version++;
+        await saveRoomState(roomId, state);
+        
+        // Return the FULL updated state to the client so they can sync immediately
+        return corsResponse({ success: true, version: state.version, state });
+    } catch (e) {
+        return corsResponse({ error: "Update failed: " + e.message }, 500);
     }
-
-    // Apply updates
-    if (updates.content !== undefined) state.content = updates.content;
-    if (updates.comments !== undefined) state.comments = updates.comments;
-    if (updates.kbFiles !== undefined) state.kbFiles = updates.kbFiles;
-    if (updates.decisions !== undefined) state.decisions = updates.decisions;
-    if (updates.impactGraph !== undefined) state.impactGraph = updates.impactGraph;
-    if (updates.settings !== undefined && userRole === 'OWNER') state.settings = { ...state.settings, ...updates.settings };
-    
-    state.version++;
-    await saveRoomState(roomId, state);
-    return corsResponse({ success: true, version: state.version });
 }
 
 async function handleVote(request) {
-    const { roomId, anchorKey, optionIndex, question, options } = await request.json();
-    let state = await getRoomState(roomId);
-    if (!state) return corsResponse({ error: "Room not found" }, 404);
+    try {
+        const body = await request.json();
+        const { roomId, anchorKey, optionIndex, question, options } = body;
+        
+        let state = await getRoomState(roomId);
+        if (!state) return corsResponse({ error: "Room not found" }, 404);
 
-    if (!state.decisions) state.decisions = {};
-    
-    // Initialize decision entry if not exists
-    if (!state.decisions[anchorKey]) {
-        state.decisions[anchorKey] = {
-            question,
-            options,
-            votes: {},
-            totalVotes: 0,
-            aiSummary: "等待更多投票以生成共识..."
-        };
+        // Robust initialization
+        if (!state.decisions) state.decisions = {};
+        
+        // Trim key to ensure matching
+        const safeKey = String(anchorKey).trim();
+
+        if (!state.decisions[safeKey]) {
+            state.decisions[safeKey] = {
+                question,
+                options,
+                votes: {},
+                totalVotes: 0,
+                aiSummary: "等待更多投票以生成共识..."
+            };
+        }
+
+        // DOUBLE CHECK: Ensure votes object exists before accessing
+        if (!state.decisions[safeKey].votes) {
+            state.decisions[safeKey].votes = {};
+        }
+
+        const currentVotes = state.decisions[safeKey].votes[optionIndex] || 0;
+        state.decisions[safeKey].votes[optionIndex] = currentVotes + 1;
+        state.decisions[safeKey].totalVotes = (state.decisions[safeKey].totalVotes || 0) + 1;
+
+        await saveRoomState(roomId, state);
+        return corsResponse({ success: true, decision: state.decisions[safeKey] });
+    } catch (e) {
+        console.error("Vote Handler Error:", e);
+        return corsResponse({ error: e.message }, 500);
     }
-
-    // Increment vote
-    const currentVotes = state.decisions[anchorKey].votes[optionIndex] || 0;
-    state.decisions[anchorKey].votes[optionIndex] = currentVotes + 1;
-    state.decisions[anchorKey].totalVotes = (state.decisions[anchorKey].totalVotes || 0) + 1;
-
-    await saveRoomState(roomId, state);
-    return corsResponse({ success: true, decision: state.decisions[anchorKey] });
 }
 
 async function handleAIReview(request) {
@@ -138,7 +203,8 @@ async function handleAIReview(request) {
     if (kbFiles && kbFiles.length > 0) {
         kbContext = `\n\n【已加载的企业知识库】：\n`;
         for (const file of kbFiles) {
-            const snippet = file.content ? file.content.substring(0, 2000) : ""; 
+            // Limit context size to avoid token overflow
+            const snippet = file.content ? file.content.substring(0, 1000) : ""; 
             kbContext += `\n--- 文档: ${file.name} ---\n${snippet}\n----------------\n`;
         }
     }
@@ -159,30 +225,53 @@ async function handleAIReview(request) {
       "comment": "具体的修改建议"
     }`;
 
-    const payload = {
-      model: "deepseek-v3",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
-      ]
-    };
+    let contentStr = "";
+    try {
+        // Attempt 1: DeepSeek
+        contentStr = await callAI([
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
+        ], "deepseek-v3");
+    } catch (e) {
+        console.log("DeepSeek failed, falling back to Qwen-Plus");
+        // Attempt 2: Qwen Plus (Stable Fallback)
+        try {
+            contentStr = await callAI([
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
+            ], "qwen-plus");
+        } catch (finalError) {
+             return corsResponse({ 
+                 comments: [{ 
+                     type: 'RISK', 
+                     severity: 'WARNING', 
+                     position: '系统消息', 
+                     comment: `AI 服务暂时拥堵，请稍后重试。` 
+                 }] 
+             });
+        }
+    }
 
-    const response = await fetch(DASHSCOPE_URL, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) throw new Error(`AI API Error: ${response.statusText}`);
-    const result = await response.json();
-    let contentStr = result.choices[0].message.content;
+    // Cleaning formatting
     contentStr = contentStr.replace(/```json/g, "").replace(/```/g, "").trim();
     
-    return corsResponse({ comments: JSON.parse(contentStr) });
+    try {
+        const comments = JSON.parse(contentStr);
+        return corsResponse({ comments });
+    } catch (parseError) {
+        // If JSON parsing fails, wrap the raw text
+        return corsResponse({ 
+            comments: [{ 
+                type: 'LANGUAGE', 
+                severity: 'INFO', 
+                position: 'AI 建议', 
+                comment: contentStr 
+            }] 
+        });
+    }
 
   } catch (e) {
-    console.error(e);
-    return corsResponse({ comments: [{ type: 'RISK', severity: 'WARNING', position: 'Global', comment: `AI 服务错误: ${e.message}` }] });
+    return corsResponse({ comments: [{ type: 'RISK', severity: 'WARNING', position: 'Global', comment: `Server Error: ${e.message}` }] });
   }
 }
 
@@ -203,27 +292,23 @@ async function handleAIImpact(request) {
         }
         请提取至少5-8个关键节点和对应的依赖关系。`;
 
-        const payload = {
-            model: "deepseek-v3",
-            messages: [
+        let contentStr = "";
+        try {
+             contentStr = await callAI([
                 { role: "system", content: systemPrompt },
                 { role: "user", content: `分析此PRD内容并生成图谱:\n${prdContent}` }
-            ]
-        };
+            ], "deepseek-v3");
+        } catch (e) {
+             contentStr = await callAI([
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `分析此PRD内容并生成图谱:\n${prdContent}` }
+            ], "qwen-plus");
+        }
 
-        const response = await fetch(DASHSCOPE_URL, {
-            method: "POST",
-            headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-
-        const result = await response.json();
-        let contentStr = result.choices[0].message.content;
         contentStr = contentStr.replace(/```json/g, "").replace(/```/g, "").trim();
-        
         return corsResponse({ impactGraph: JSON.parse(contentStr) });
     } catch (e) {
-        return corsResponse({ error: e.message }, 500);
+        return corsResponse({ error: "Graph Gen Failed: " + e.message }, 500);
     }
 }
 

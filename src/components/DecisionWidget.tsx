@@ -1,7 +1,7 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { DecisionData } from '../types';
-import { BrainCircuit, Loader2, Check } from 'lucide-react';
+import { BrainCircuit, Loader2 } from 'lucide-react';
 
 interface Props {
     rawAnchor: string;
@@ -13,7 +13,6 @@ const DecisionWidget: React.FC<Props> = ({ rawAnchor, serverData, onVote }) => {
     const [loading, setLoading] = useState(false);
     
     // Parse anchor syntax: {{DECISION: Question | Option1 | Option2}}
-    // Default options if none provided: Agree, Disagree
     const content = rawAnchor.replace('{{DECISION:', '').replace('}}', '').trim();
     const parts = content.split('|').map(s => s.trim());
     const question = parts[0];
@@ -22,7 +21,9 @@ const DecisionWidget: React.FC<Props> = ({ rawAnchor, serverData, onVote }) => {
     const handleVoteClick = async (index: number) => {
         setLoading(true);
         try {
-            await onVote(index, question, options);
+            await onVote(index, question.trim(), options);
+        } catch (e) {
+            alert("投票失败，请重试");
         } finally {
             setLoading(false);
         }
@@ -49,7 +50,7 @@ const DecisionWidget: React.FC<Props> = ({ rawAnchor, serverData, onVote }) => {
                             key={idx}
                             onClick={() => handleVoteClick(idx)}
                             disabled={loading}
-                            className="w-full relative overflow-hidden bg-gray-50 border border-gray-200 rounded-lg p-2 text-left hover:border-aliyun/50 transition-all group"
+                            className="w-full relative overflow-hidden bg-gray-50 border border-gray-200 rounded-lg p-2 text-left hover:border-aliyun/50 transition-all group disabled:opacity-70 disabled:cursor-not-allowed"
                         >
                             {/* Progress Bar Background */}
                             <div 
