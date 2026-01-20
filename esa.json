@@ -1,6 +1,6 @@
 {
   "name": "prd-agents",
-  "entry": "functions/index.js",
+  "entry": "./functions/index.js",
   "output": "dist",
   "routes": [
     {

@@ -7,7 +7,9 @@
 import { EdgeKV } from '@aliyun/esa-kv';
 
 // Configuration
+// Note: In a production environment, use ESA Environment Variables for secrets.
 const API_KEY = "sk-26d09fa903034902928ae380a56ecfd3"; 
+// Aliyun Bailian (DashScope) Compatible Endpoint for DeepSeek
 const DASHSCOPE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 
 function corsResponse(data, status = 200) {
@@ -25,14 +27,14 @@ function corsResponse(data, status = 200) {
 // --- Persistence Helpers ---
 async function getRoomState(roomId) {
     try {
-        // 确保您在 ESA 控制台 -> 边缘KV 中创建了名为 "prd-kv" 的命名空间
+        // Ensure you have created the 'prd-kv' namespace in ESA Console -> EdgeKV
         const kv = new EdgeKV({ namespace: "prd-kv" });
         const data = await kv.get(`room:${roomId}`, { type: "json" });
         return data;
     } catch (e) { 
-        // 抛出具体错误以便前端感知 KV 配置问题
         console.error(`KV Read Error (Namespace 'prd-kv'): ${e.message}`);
-        throw new Error(`KV存储读取失败，请检查ESA控制台是否创建了 'prd-kv' 命名空间。详情: ${e.message}`);
+        // Return null if not found or error, to allow initialization
+        return null; 
     }
 }
 
@@ -40,7 +42,8 @@ async function saveRoomState(roomId, state) {
     state.lastUpdated = Date.now();
     try {
         const kv = new EdgeKV({ namespace: "prd-kv" });
-        await kv.put(`room:${roomId}`, JSON.stringify(state), { expirationTtl: 86400 });
+        // TTL 7 days (604800 seconds)
+        await kv.put(`room:${roomId}`, JSON.stringify(state), { expirationTtl: 604800 });
     } catch (e) { 
         console.error(`KV Write Error: ${e.message}`);
         throw new Error(`KV存储写入失败: ${e.message}`);
@@ -50,19 +53,20 @@ async function saveRoomState(roomId, state) {
 
 // --- AI Helper ---
 async function callAI(messages, model = "deepseek-v3") {
-    // 设置较长的超时时间，防止 AI 思考时间过长导致中断
+    // 60s timeout for AI response
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90秒超时
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     try {
+        // Aliyun Bailian expects "model" parameter to match the deployed model name.
+        // Assuming "deepseek-v3" is the valid model code on Bailian. 
+        // If using qwen, change to "qwen-plus" or "qwen-max".
         const payload = {
             model: model,
             messages: messages,
             temperature: 0.3
         };
 
-        console.log(`Calling AI Model: ${model}`);
-        
         const response = await fetch(DASHSCOPE_URL, {
             method: "POST",
             headers: { 
@@ -77,9 +81,7 @@ async function callAI(messages, model = "deepseek-v3") {
 
         if (!response.ok) {
             const errText = await response.text();
-            console.error(`AI API Error [${model}]: ${response.status} - ${errText}`);
-            // 直接抛出上游的错误信息，不要模糊处理
-            throw new Error(`Provider Error (${response.status}): ${errText}`);
+            throw new Error(`AI API Error (${response.status}): ${errText}`);
         }
 
         const result = await response.json();
@@ -128,7 +130,7 @@ async function handleRoomUpdate(request) {
                 lastUpdated: Date.now()
             };
         } else {
-            // Permission Check
+            // Permission Check (skip for Owner)
             if (userRole !== 'OWNER' && !state.settings.allowGuestEdit && updates.content) {
                 return corsResponse({ error: "无权编辑文档" }, 403);
             }
@@ -200,39 +202,23 @@ async function handleAIReview(request) {
     必须返回纯JSON数组，格式：[{ "type": "RISK"|"TECH"|"LOGIC", "severity": "BLOCKER"|"WARNING", "position": "位置", "originalText": "原文", "comment": "意见" }]`;
 
     let contentStr = "";
-    let lastError = null;
-
-    // 优先尝试 DeepSeek-V3
+    
+    // Attempt DeepSeek-V3 first
     try {
         contentStr = await callAI([
             { role: "system", content: systemPrompt },
-            { role: "user", content: `审查PRD:\n${prdContent.substring(0, 15000)}` } // 截断防止超长
+            { role: "user", content: `审查PRD:\n${prdContent.substring(0, 15000)}` } 
         ], "deepseek-v3");
     } catch (e) {
-        console.error("DeepSeek-v3 failed:", e.message);
-        lastError = e;
-        
-        // 失败回退到 Qwen-Plus
-        try {
-            console.log("Fallback to qwen-plus...");
-            contentStr = await callAI([
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `审查PRD:\n${prdContent.substring(0, 15000)}` }
-            ], "qwen-plus");
-        } catch (finalError) {
-             // 构造一个“错误评论”返回给前端，而不是直接 HTTP 500，这样用户能看到原因
-             return corsResponse({ 
-                 comments: [{ 
-                     type: 'RISK', 
-                     severity: 'BLOCKER', 
-                     position: '系统错误', 
-                     comment: `AI 服务调用失败。Primary: ${lastError.message}. Fallback: ${finalError.message}. 请检查 API Key 余额或模型权限。` 
-                 }] 
-             });
-        }
+        console.error("DeepSeek-v3 failed, fallback to qwen-plus:", e.message);
+        // Fallback to qwen-plus if deepseek model name is different or unavailable
+        contentStr = await callAI([
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `审查PRD:\n${prdContent.substring(0, 15000)}` }
+        ], "qwen-plus");
     }
 
-    // 清理 Markdown 代码块格式
+    // Sanitize Markdown code blocks if AI returns them
     contentStr = contentStr.replace(/```json/g, "").replace(/```/g, "").trim();
     
     try {
@@ -241,10 +227,10 @@ async function handleAIReview(request) {
     } catch (parseError) {
         return corsResponse({ 
             comments: [{ 
-                type: 'LANGUAGE', 
+                type: 'LOGIC', 
                 severity: 'INFO', 
-                position: 'AI解析警告', 
-                comment: `AI 返回了非标准 JSON，原始内容：${contentStr.substring(0, 100)}...` 
+                position: '系统', 
+                comment: `AI 返回格式解析失败，请重试。原始内容片段: ${contentStr.substring(0, 50)}` 
             }] 
         });
     }
@@ -262,7 +248,7 @@ async function handleAIImpact(request) {
         let contentStr = await callAI([
             { role: "system", content: systemPrompt },
             { role: "user", content: prdContent.substring(0, 5000) }
-        ], "qwen-plus"); // 使用 qwen-plus 保证稳定性
+        ], "qwen-plus"); 
 
         contentStr = contentStr.replace(/```json/g, "").replace(/```/g, "").trim();
         return corsResponse({ impactGraph: JSON.parse(contentStr) });
@@ -277,7 +263,6 @@ export default {
         if (request.method === "OPTIONS") return corsResponse({}, 200);
         const url = new URL(request.url);
 
-        // 路由分发
         if (url.pathname === "/api/room/sync") return await handleRoomSync(request, url.href);
         if (url.pathname === "/api/room/update") return await handleRoomUpdate(request);
         if (url.pathname === "/api/review") return await handleAIReview(request);
