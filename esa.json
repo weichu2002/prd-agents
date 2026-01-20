@@ -1,0 +1,15 @@
+{
+  "name": "prd-agents",
+  "entry": "functions/index.js",
+  "output": "dist",
+  "routes": [
+    {
+      "pattern": "/api/*",
+      "type": "function"
+    },
+    {
+      "pattern": "/*",
+      "type": "asset"
+    }
+  ]
+}
