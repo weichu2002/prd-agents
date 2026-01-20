@@ -1,3 +1,4 @@
+
 export const DEMO_PROJECT_NAME = "灵境 (Nexus) - 下一代沉浸式VR社交平台";
 
 export const LINGJING_PRD_CONTENT = `
@@ -17,7 +18,7 @@ export const LINGJING_PRD_CONTENT = `
 ### 3.1 虚拟形象系统
 用户可创建高度自定义的3D虚拟形象。支持实时面部表情捕捉与驱动。
 
-{{DECISION: 面部驱动方案采用端侧计算还是云端计算？}}
+{{DECISION: 面部驱动方案采用端侧计算还是云端计算？ | 方案A (端侧计算) | 方案B (云端推流)}}
 
 **方案A（端侧）**：利用手机前置摄像头，本地ML模型计算，节省带宽，延迟低。
 **方案B（云端）**：上传视频流至云端服务器处理，精度高，但耗流量，延迟依赖网络。

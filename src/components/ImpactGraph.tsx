@@ -1,71 +1,87 @@
+
 import React, { useEffect, useRef } from 'react';
 import * as d3 from 'd3';
 import { ImpactData } from '../types';
 
-const ImpactGraph: React.FC = () => {
+interface Props {
+    data: ImpactData;
+    onDeleteNode?: (id: string) => void;
+}
+
+const ImpactGraph: React.FC<Props> = ({ data, onDeleteNode }) => {
     const svgRef = useRef<SVGSVGElement>(null);
 
-    // Mock data based on the scenario
-    const data: ImpactData = {
-        nodes: [
-            { id: "PRD: 虚拟形象", group: 1, val: 20 },
-            { id: "用户中心", group: 2, val: 10 },
-            { id: "3D渲染引擎", group: 2, val: 15 },
-            { id: "实时通信服务", group: 2, val: 10 },
-            { id: "内容审核", group: 3, val: 8 },
-            { id: "支付系统", group: 3, val: 5 }
-        ],
-        links: [
-            { source: "PRD: 虚拟形象", target: "用户中心" },
-            { source: "PRD: 虚拟形象", target: "3D渲染引擎" },
-            { source: "3D渲染引擎", target: "实时通信服务" },
-            { source: "实时通信服务", target: "内容审核" }
-        ]
-    };
-
     useEffect(() => {
-        if (!svgRef.current) return;
+        if (!svgRef.current || !data.nodes || data.nodes.length === 0) return;
 
-        const width = svgRef.current.clientWidth;
-        const height = 300;
+        const width = svgRef.current.clientWidth || 600;
+        const height = 400;
 
         const svg = d3.select(svgRef.current);
         svg.selectAll("*").remove(); // Clear previous
 
-        const simulation = d3.forceSimulation(data.nodes as d3.SimulationNodeDatum[])
-            .force("link", d3.forceLink(data.links).id((d: any) => d.id).distance(80))
-            .force("charge", d3.forceManyBody().strength(-200))
+        // Create arrows definition
+        svg.append("defs").selectAll("marker")
+            .data(["end"])
+            .join("marker")
+            .attr("id", "arrow")
+            .attr("viewBox", "0 -5 10 10")
+            .attr("refX", 15)
+            .attr("refY", 0)
+            .attr("markerWidth", 6)
+            .attr("markerHeight", 6)
+            .attr("orient", "auto")
+            .append("path")
+            .attr("d", "M0,-5L10,0L0,5")
+            .attr("fill", "#999");
+
+        const simulation = d3.forceSimulation(JSON.parse(JSON.stringify(data.nodes))) 
+            .force("link", d3.forceLink(JSON.parse(JSON.stringify(data.links))).id((d: any) => d.id).distance(100))
+            .force("charge", d3.forceManyBody().strength(-300))
             .force("center", d3.forceCenter(width / 2, height / 2));
 
         const link = svg.append("g")
             .attr("stroke", "#999")
             .attr("stroke-opacity", 0.6)
             .selectAll("line")
-            .data(data.links)
+            .data(JSON.parse(JSON.stringify(data.links)))
             .join("line")
-            .attr("stroke-width", 2);
+            .attr("stroke-width", 2)
+            .attr("marker-end", "url(#arrow)");
 
         const node = svg.append("g")
             .attr("stroke", "#fff")
             .attr("stroke-width", 1.5)
             .selectAll("circle")
-            .data(data.nodes)
+            .data(JSON.parse(JSON.stringify(data.nodes)))
             .join("circle")
-            .attr("r", (d) => (d.val || 5))
-            .attr("fill", (d) => d.group === 1 ? "#FF6A00" : (d.group === 2 ? "#3b82f6" : "#10b981"))
+            .attr("r", (d: any) => (d.val || 10))
+            .attr("fill", (d: any) => {
+                if(d.group === 1) return "#FF6A00"; // Feature
+                if(d.group === 2) return "#3b82f6"; // Service
+                return "#10b981"; // Database/Infra
+            })
+            .style("cursor", "pointer")
+            .on("dblclick", (event, d: any) => {
+                if (onDeleteNode && confirm(`Confirm delete node: ${d.id}?`)) {
+                    onDeleteNode(d.id);
+                }
+            })
             .call(drag(simulation) as any);
 
-        node.append("title").text((d) => d.id);
+        node.append("title").text((d: any) => `${d.id} (Double click to delete)`);
 
         const labels = svg.append("g")
             .selectAll("text")
-            .data(data.nodes)
+            .data(JSON.parse(JSON.stringify(data.nodes)))
             .join("text")
             .attr("dx", 12)
             .attr("dy", ".35em")
-            .text((d) => d.id)
-            .style("font-size", "10px")
-            .style("fill", "#555");
+            .text((d: any) => d.id)
+            .style("font-size", "11px")
+            .style("font-family", "sans-serif")
+            .style("fill", "#333")
+            .style("font-weight", "bold");
 
         simulation.on("tick", () => {
             link
@@ -106,9 +122,17 @@ const ImpactGraph: React.FC = () => {
                 .on("drag", dragged)
                 .on("end", dragended);
         }
-    }, []);
+    }, [data, onDeleteNode]);
 
-    return <svg ref={svgRef} className="w-full h-[300px] bg-gray-50 rounded-lg border border-gray-100" />;
+    if (!data.nodes || data.nodes.length === 0) {
+        return (
+            <div className="w-full h-[400px] bg-gray-50 rounded-lg border border-gray-100 flex items-center justify-center text-gray-400">
+                暂无分析数据，请点击上方“AI 构建”或手动添加节点
+            </div>
+        );
+    }
+
+    return <svg ref={svgRef} className="w-full h-[400px] bg-white rounded-lg border border-gray-200 shadow-inner" />;
 };
 
 export default ImpactGraph;

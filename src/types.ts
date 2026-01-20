@@ -12,19 +12,13 @@ export interface PRDSection {
     content: string;
 }
 
-export interface DecisionAnchor {
-    id: string;
+// Updated Decision Interface
+export interface DecisionData {
     question: string;
-    startIndex: number;
-    endIndex: number;
-}
-
-export interface VoteData {
-    pros: number;
-    cons: number;
-    heatmap: number;
-    aiSummary: string;
-    userVote?: 'PRO' | 'CON';
+    options: string[];
+    votes: { [optionIndex: number]: number }; // Map option index to count
+    totalVotes: number;
+    aiSummary?: string;
 }
 
 export interface AIReviewComment {
@@ -37,6 +31,7 @@ export interface AIReviewComment {
     question?: string;
     author?: string;
     timestamp?: number;
+    lastUpdated?: number;
 }
 
 export interface ImpactNode {
@@ -55,24 +50,20 @@ export interface ImpactData {
     links: ImpactLink[];
 }
 
-// New Types for Collaboration
 export type UserRole = 'OWNER' | 'GUEST';
-
-// New: Document Status
 export type ProjectStatus = 'DRAFT' | 'REVIEW' | 'APPROVED';
 
 export interface RoomSettings {
     allowGuestEdit: boolean;
     allowGuestComment: boolean;
     isActive: boolean;
-    status: ProjectStatus; // Added status
+    status: ProjectStatus;
 }
 
-// New: Real Knowledge Base Document
 export interface KBDocument {
     id: string;
     name: string;
-    content: string; // Extracted text content
+    content: string;
     size: number;
     uploadedAt: number;
 }
@@ -82,7 +73,9 @@ export interface RoomState {
     content: string;
     comments: AIReviewComment[];
     settings: RoomSettings;
-    kbFiles: KBDocument[]; // Changed from static list to dynamic objects
+    kbFiles: KBDocument[];
+    decisions: { [anchorKey: string]: DecisionData }; // New: Store votes by anchor question/key
+    impactGraph: ImpactData; // New: Persist the graph
     version: number;
     lastUpdated: number;
 }
