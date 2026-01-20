@@ -1,6 +1,6 @@
 /**
  * Aliyun ESA Edge Function Entry Point
- * Handles API routing for PRD-Agents
+ * Handles API routing for PRD-Agents with Room Isolation
  */
 
 import { EdgeKV } from '@aliyun/esa-kv'; // Virtual import for ESA environment
@@ -37,7 +37,7 @@ async function handleAIReview(request) {
     输出格式为严格的JSON数组，每个对象包含：type, severity, position, originalText, comment, question.`;
 
     const payload = {
-      model: "deepseek-v3", // Using DeepSeek as requested via compatible endpoint
+      model: "deepseek-v3",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
@@ -58,7 +58,6 @@ async function handleAIReview(request) {
     }
 
     const result = await response.json();
-    // Try to parse the content as JSON, if it's wrapped in markdown code blocks, clean it
     let contentStr = result.choices[0].message.content;
     contentStr = contentStr.replace(/```json/g, "").replace(/```/g, "").trim();
     
@@ -71,23 +70,21 @@ async function handleAIReview(request) {
   }
 }
 
-// Handler for Voting (Consensus)
+// Handler for Voting (Consensus) with Room Support
 async function handleVote(request, url) {
-    // Extract anchorId from URL param
-    const anchorId = new URL(url).searchParams.get("anchorId");
+    const urlObj = new URL(url);
+    const anchorId = urlObj.searchParams.get("anchorId");
+    const roomId = urlObj.searchParams.get("roomId") || "default";
     
     try {
         const body = await request.json(); // { vote: 'PRO' | 'CON', reason: string }
         
-        // Use EdgeKV to store votes
-        // Note: In local dev without ESA emulator, this will fail. 
-        // We add a try-catch to fallback for demo purposes if KV is missing.
         let kv;
         try {
             kv = new EdgeKV({ namespace: "prd-kv" });
-            const key = `decision:${anchorId}:votes`;
+            // Key structure includes roomId to isolate data
+            const key = `room:${roomId}:decision:${anchorId}:votes`;
             
-            // Get existing votes
             let currentVotes = [];
             try {
                 const existing = await kv.get(key, { type: "json" });
@@ -96,22 +93,53 @@ async function handleVote(request, url) {
 
             currentVotes.push({ ...body, timestamp: Date.now() });
             
-            // Save back
             await kv.put(key, JSON.stringify(currentVotes));
         } catch (kvError) {
-            console.warn("KV not available (running locally?), skipping persistence", kvError);
+            console.warn("KV not available, skipping persistence", kvError);
         }
 
-        // Return a simulated Consensus Summary for immediate feedback
+        // Generate simulated dynamic feedback
         return corsResponse({
             success: true,
-            heatmap: Math.random(), // Simulate dynamic heatmap
+            heatmap: Math.random(), 
             aiSummary: body.vote === 'PRO' 
-                ? "当前共识倾向于方案A（端侧），主要基于用户隐私保护和带宽成本考量。" 
-                : "当前共识倾向于方案B（云端），技术团队担忧端侧算力不足导致卡顿。"
+                ? "当前房间共识倾向于方案A（端侧），主要基于用户隐私保护和带宽成本考量。" 
+                : "当前房间共识倾向于方案B（云端），技术团队担忧端侧算力不足导致卡顿。"
         });
 
     } catch (e) {
+        return corsResponse({ error: e.message }, 500);
+    }
+}
+
+// Handler for storing/retrieving comments (Simulated backend for persistence)
+async function handleComments(request, url) {
+    const urlObj = new URL(url);
+    const roomId = urlObj.searchParams.get("roomId") || "default";
+
+    try {
+        if (request.method === "POST") {
+            const { comments } = await request.json();
+             // Store comments in KV
+             try {
+                const kv = new EdgeKV({ namespace: "prd-kv" });
+                const key = `room:${roomId}:comments`;
+                await kv.put(key, JSON.stringify(comments));
+             } catch(e) { console.warn("KV Save failed", e); }
+             
+             return corsResponse({ success: true });
+        } 
+        
+        // GET
+        try {
+            const kv = new EdgeKV({ namespace: "prd-kv" });
+            const key = `room:${roomId}:comments`;
+            const comments = await kv.get(key, { type: "json" });
+            return corsResponse({ comments: comments || [] });
+        } catch(e) {
+            return corsResponse({ comments: [] });
+        }
+    } catch(e) {
         return corsResponse({ error: e.message }, 500);
     }
 }
@@ -136,6 +164,10 @@ export default {
 
     if (url.pathname === "/api/vote") {
       return handleVote(request, url.href);
+    }
+
+    if (url.pathname === "/api/comments") {
+        return handleComments(request, url.href);
     }
     
     if (url.pathname === "/api/init") {
