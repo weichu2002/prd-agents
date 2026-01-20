@@ -1,9 +1,10 @@
+
 import React, { useState } from 'react';
-import { Bot, Users, Zap, ArrowRight, ShieldCheck, Sparkles, Settings, Lock, Unlock } from 'lucide-react';
+import { Bot, Users, Zap, ArrowRight, ShieldCheck, Sparkles, Settings, Rocket } from 'lucide-react';
 import { RoomSettings } from '../types';
 
 interface Props {
-    onCreate: (settings: RoomSettings) => void;
+    onCreate: (settings: RoomSettings, isDemo?: boolean) => void;
     onJoin: (id: string) => void;
 }
 
@@ -22,7 +23,17 @@ export const LandingPage: React.FC<Props> = ({ onCreate, onJoin }) => {
     };
 
     const confirmCreate = () => {
-        onCreate(settings);
+        onCreate(settings, false);
+    };
+    
+    const confirmDemo = () => {
+        // Demo allows guest edits by default for better experience
+        onCreate({
+            allowGuestEdit: true,
+            allowGuestComment: true,
+            isActive: true,
+            status: 'DRAFT'
+        }, true);
     };
 
     return (
@@ -52,17 +63,26 @@ export const LandingPage: React.FC<Props> = ({ onCreate, onJoin }) => {
                     PRD-Agents 是下一代产品协作平台。集成 DeepSeek AI 评审、实时团队共识投票与边缘实时同步，让产品决策有据可依。
                 </p>
 
-                <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md items-start">
+                <div className="flex flex-col sm:flex-row gap-4 w-full max-w-2xl items-start justify-center">
                     {!isCreating ? (
-                        <button 
-                            onClick={handleCreateClick}
-                            className="w-full sm:w-auto flex-1 flex items-center justify-center gap-2 bg-slate-900 text-white px-8 py-4 rounded-xl hover:bg-slate-800 transition-all shadow-lg hover:shadow-xl font-bold text-lg group h-[52px]"
-                        >
-                            <Sparkles className="w-5 h-5 text-yellow-400 group-hover:animate-pulse" />
-                            创建新项目
-                        </button>
+                        <>
+                             <button 
+                                onClick={handleCreateClick}
+                                className="w-full sm:w-auto flex items-center justify-center gap-2 bg-white text-slate-900 border border-slate-200 px-8 py-4 rounded-xl hover:bg-gray-50 transition-all shadow-sm hover:shadow-md font-bold text-lg h-[52px]"
+                            >
+                                <Sparkles className="w-5 h-5 text-gray-400" />
+                                创建空白项目
+                            </button>
+                            <button 
+                                onClick={confirmDemo}
+                                className="w-full sm:w-auto flex items-center justify-center gap-2 bg-slate-900 text-white px-8 py-4 rounded-xl hover:bg-slate-800 transition-all shadow-lg hover:shadow-xl font-bold text-lg group h-[52px]"
+                            >
+                                <Rocket className="w-5 h-5 text-aliyun group-hover:animate-bounce" />
+                                加载 "灵境" 演示项目
+                            </button>
+                        </>
                     ) : (
-                        <div className="w-full bg-white p-4 rounded-xl shadow-xl border border-gray-200 text-left animate-in fade-in zoom-in-95">
+                        <div className="w-full max-w-md bg-white p-4 rounded-xl shadow-xl border border-gray-200 text-left animate-in fade-in zoom-in-95 mx-auto">
                             <h3 className="font-bold text-gray-800 mb-3 flex items-center gap-2">
                                 <Settings className="w-4 h-4" /> 初始化房间权限
                             </h3>
@@ -99,7 +119,7 @@ export const LandingPage: React.FC<Props> = ({ onCreate, onJoin }) => {
                             placeholder="输入房间号..."
                             value={joinId}
                             onChange={(e) => setJoinId(e.target.value)}
-                            className="w-full px-4 rounded-xl border border-gray-300 focus:outline-none focus:border-aliyun focus:ring-2 focus:ring-aliyun/20 bg-white h-full"
+                            className="w-full px-4 rounded-xl border border-gray-300 focus:outline-none focus:border-aliyun focus:ring-2 focus:ring-aliyun/20 bg-white h-full min-w-[160px]"
                          />
                          <button 
                             onClick={() => joinId && onJoin(joinId)}

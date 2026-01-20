@@ -1,14 +1,13 @@
 
 /**
  * Aliyun ESA Edge Function Entry Point
- * Handles API routing for PRD-Agents with State Persistence
+ * Handles API routing for PRD-Agents with State Persistence and AI Integration
  */
 
 import { EdgeKV } from '@aliyun/esa-kv';
 
 // Configuration
 const API_KEY = "sk-26d09fa903034902928ae380a56ecfd3"; 
-// 使用兼容模式 Endpoint
 const DASHSCOPE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 
 function corsResponse(data, status = 200) {
@@ -26,12 +25,14 @@ function corsResponse(data, status = 200) {
 // --- Persistence Helpers ---
 async function getRoomState(roomId) {
     try {
+        // 确保您在 ESA 控制台 -> 边缘KV 中创建了名为 "prd-kv" 的命名空间
         const kv = new EdgeKV({ namespace: "prd-kv" });
         const data = await kv.get(`room:${roomId}`, { type: "json" });
         return data;
     } catch (e) { 
-        console.warn("KV Get Error (Check if 'prd-kv' namespace exists in ESA console):", e); 
-        return null;
+        // 抛出具体错误以便前端感知 KV 配置问题
+        console.error(`KV Read Error (Namespace 'prd-kv'): ${e.message}`);
+        throw new Error(`KV存储读取失败，请检查ESA控制台是否创建了 'prd-kv' 命名空间。详情: ${e.message}`);
     }
 }
 
@@ -39,26 +40,29 @@ async function saveRoomState(roomId, state) {
     state.lastUpdated = Date.now();
     try {
         const kv = new EdgeKV({ namespace: "prd-kv" });
-        // Set TTL to 24 hours
         await kv.put(`room:${roomId}`, JSON.stringify(state), { expirationTtl: 86400 });
-    } catch (e) { console.warn("KV Save Error:", e); }
+    } catch (e) { 
+        console.error(`KV Write Error: ${e.message}`);
+        throw new Error(`KV存储写入失败: ${e.message}`);
+    }
     return state;
 }
 
 // --- AI Helper ---
 async function callAI(messages, model = "deepseek-v3") {
-    try {
-        // DeepSeek V3 in DashScope might need specific parameters or fail on high load
-        // Increased timeout to 60s for stability
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000); 
+    // 设置较长的超时时间，防止 AI 思考时间过长导致中断
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90秒超时
 
+    try {
         const payload = {
             model: model,
             messages: messages,
             temperature: 0.3
         };
 
+        console.log(`Calling AI Model: ${model}`);
+        
         const response = await fetch(DASHSCOPE_URL, {
             method: "POST",
             headers: { 
@@ -73,17 +77,18 @@ async function callAI(messages, model = "deepseek-v3") {
 
         if (!response.ok) {
             const errText = await response.text();
-            console.error(`AI API Error (${model}): ${response.status} - ${errText}`);
-            throw new Error(`Cloud API Error: ${response.status} - ${errText}`);
+            console.error(`AI API Error [${model}]: ${response.status} - ${errText}`);
+            // 直接抛出上游的错误信息，不要模糊处理
+            throw new Error(`Provider Error (${response.status}): ${errText}`);
         }
 
         const result = await response.json();
         if (!result.choices || result.choices.length === 0) {
-             throw new Error("Empty response from AI provider");
+             throw new Error("AI Provider returned empty choices.");
         }
         return result.choices[0].message.content;
     } catch (e) {
-        console.warn(`AI Call Failed (${model}):`, e.message);
+        clearTimeout(timeoutId);
         throw e;
     }
 }
@@ -93,11 +98,15 @@ async function callAI(messages, model = "deepseek-v3") {
 async function handleRoomSync(request, url) {
     const urlObj = new URL(url);
     const roomId = urlObj.searchParams.get("roomId");
-    if (!roomId) return corsResponse({ error: "No Room ID" }, 400);
+    if (!roomId) return corsResponse({ error: "Missing roomId" }, 400);
 
-    let state = await getRoomState(roomId);
-    if (!state) return corsResponse({ exists: false });
-    return corsResponse({ exists: true, state });
+    try {
+        let state = await getRoomState(roomId);
+        if (!state) return corsResponse({ exists: false });
+        return corsResponse({ exists: true, state });
+    } catch (e) {
+        return corsResponse({ error: e.message }, 500);
+    }
 }
 
 async function handleRoomUpdate(request) {
@@ -105,7 +114,7 @@ async function handleRoomUpdate(request) {
         const { roomId, updates, userRole } = await request.json();
         let state = await getRoomState(roomId);
         
-        // Initialize if new (first save)
+        // Initialize if new
         if (!state) {
             state = {
                 roomId,
@@ -119,11 +128,9 @@ async function handleRoomUpdate(request) {
                 lastUpdated: Date.now()
             };
         } else {
+            // Permission Check
             if (userRole !== 'OWNER' && !state.settings.allowGuestEdit && updates.content) {
-                return corsResponse({ error: "Permission Denied: Guest editing is disabled." }, 403);
-            }
-            if (userRole !== 'OWNER' && !state.settings.allowGuestComment && (updates.comments || updates.newComment || updates.newComments)) {
-                return corsResponse({ error: "Permission Denied: Guest commenting is disabled." }, 403);
+                return corsResponse({ error: "无权编辑文档" }, 403);
             }
         }
 
@@ -134,27 +141,17 @@ async function handleRoomUpdate(request) {
         if (updates.impactGraph !== undefined) state.impactGraph = updates.impactGraph;
         if (updates.settings !== undefined && userRole === 'OWNER') state.settings = { ...state.settings, ...updates.settings };
 
-        // Comment Handling: Prioritize APPEND over REPLACE for concurrency
         if (!state.comments) state.comments = [];
-        
-        if (updates.newComment) {
-            // Atomic append for a single comment
-            state.comments.push(updates.newComment);
-        } else if (updates.newComments) {
-            // Atomic append for multiple comments (e.g., AI batch)
-            state.comments.push(...updates.newComments);
-        } else if (updates.comments !== undefined) {
-            // Full replace (fallback or deletion/edit)
-            state.comments = updates.comments;
-        }
+        if (updates.newComment) state.comments.push(updates.newComment);
+        if (updates.newComments) state.comments.push(...updates.newComments);
+        if (updates.comments !== undefined) state.comments = updates.comments;
         
         state.version++;
         await saveRoomState(roomId, state);
         
-        // Return the FULL updated state to the client so they can sync immediately
         return corsResponse({ success: true, version: state.version, state });
     } catch (e) {
-        return corsResponse({ error: "Update failed: " + e.message }, 500);
+        return corsResponse({ error: e.message }, 500);
     }
 }
 
@@ -164,13 +161,9 @@ async function handleVote(request) {
         const { roomId, anchorKey, optionIndex, question, options } = body;
         
         let state = await getRoomState(roomId);
-        // If KV is not configured, state might be null.
-        if (!state) return corsResponse({ error: "Room not found (Check if KV namespace 'prd-kv' is created in ESA)" }, 404);
+        if (!state) return corsResponse({ error: "房间不存在，请先创建项目。" }, 404);
 
-        // Robust initialization
         if (!state.decisions) state.decisions = {};
-        
-        // Trim key to ensure matching
         const safeKey = String(anchorKey).trim();
 
         if (!state.decisions[safeKey]) {
@@ -179,14 +172,10 @@ async function handleVote(request) {
                 options,
                 votes: {},
                 totalVotes: 0,
-                aiSummary: "等待更多投票以生成共识..."
+                aiSummary: "等待更多投票..."
             };
         }
-
-        // DOUBLE CHECK: Ensure votes object exists before accessing
-        if (!state.decisions[safeKey].votes) {
-            state.decisions[safeKey].votes = {};
-        }
+        if (!state.decisions[safeKey].votes) state.decisions[safeKey].votes = {};
 
         const currentVotes = state.decisions[safeKey].votes[optionIndex] || 0;
         state.decisions[safeKey].votes[optionIndex] = currentVotes + 1;
@@ -195,8 +184,7 @@ async function handleVote(request) {
         await saveRoomState(roomId, state);
         return corsResponse({ success: true, decision: state.decisions[safeKey] });
     } catch (e) {
-        console.error("Vote Handler Error:", e);
-        return corsResponse({ error: "Vote failed: " + e.message }, 500);
+        return corsResponse({ error: e.message }, 500);
     }
 }
 
@@ -204,87 +192,65 @@ async function handleAIReview(request) {
   try {
     const { prdContent, kbFiles } = await request.json(); 
     let kbContext = "";
-    
     if (kbFiles && kbFiles.length > 0) {
-        kbContext = `\n\n【已加载的企业知识库】：\n`;
-        for (const file of kbFiles) {
-            // Limit context size to avoid token overflow
-            const snippet = file.content ? file.content.substring(0, 1000) : ""; 
-            kbContext += `\n--- 文档: ${file.name} ---\n${snippet}\n----------------\n`;
-        }
+        kbContext = `\n\n【关联知识库文件】：\n` + kbFiles.map(f => `- ${f.name}: ${f.content.substring(0, 500)}...`).join('\n');
     }
 
-    const systemPrompt = `你是一位来自顶尖科技公司的首席产品架构师。深度审查PRD文档。${kbContext}
-    
-    核心原则：
-    1. 逻辑完备性：检查是否缺失成功指标、异常流程。
-    2. 技术一致性：检查是否符合通常的技术架构标准或知识库中的规范。
-    3. 风险识别：识别安全、性能、合规风险。
-    
-    输出格式为严格的JSON数组，不包含Markdown格式标记，每个对象包含：
-    {
-      "type": "LOGIC" | "TECH" | "RISK" | "LANGUAGE",
-      "severity": "BLOCKER" | "WARNING" | "SUGGESTION",
-      "position": "章节号或相关文本",
-      "originalText": "引用的原文",
-      "comment": "具体的修改建议"
-    }`;
+    const systemPrompt = `你是一位首席产品架构师。请审查PRD文档。${kbContext}
+    必须返回纯JSON数组，格式：[{ "type": "RISK"|"TECH"|"LOGIC", "severity": "BLOCKER"|"WARNING", "position": "位置", "originalText": "原文", "comment": "意见" }]`;
 
     let contentStr = "";
     let lastError = null;
 
+    // 优先尝试 DeepSeek-V3
     try {
-        // Attempt 1: DeepSeek
         contentStr = await callAI([
             { role: "system", content: systemPrompt },
-            { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
+            { role: "user", content: `审查PRD:\n${prdContent.substring(0, 15000)}` } // 截断防止超长
         ], "deepseek-v3");
     } catch (e) {
-        console.warn("DeepSeek failed, falling back to Qwen-Plus. Error:", e.message);
+        console.error("DeepSeek-v3 failed:", e.message);
         lastError = e;
-        // Attempt 2: Qwen Plus (Stable Fallback)
+        
+        // 失败回退到 Qwen-Plus
         try {
+            console.log("Fallback to qwen-plus...");
             contentStr = await callAI([
                 { role: "system", content: systemPrompt },
-                { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
+                { role: "user", content: `审查PRD:\n${prdContent.substring(0, 15000)}` }
             ], "qwen-plus");
         } catch (finalError) {
-             // Return the actual error to the user for debugging
-             const errMsg = finalError.message.includes("401") ? "API Key 无效或过期" : 
-                            finalError.message.includes("404") ? "模型名称错误 (DeepSeek/Qwen)" : 
-                            finalError.message;
-             
+             // 构造一个“错误评论”返回给前端，而不是直接 HTTP 500，这样用户能看到原因
              return corsResponse({ 
                  comments: [{ 
                      type: 'RISK', 
-                     severity: 'WARNING', 
+                     severity: 'BLOCKER', 
                      position: '系统错误', 
-                     comment: `AI 服务调用失败: ${errMsg} (Primary Error: ${lastError?.message})` 
+                     comment: `AI 服务调用失败。Primary: ${lastError.message}. Fallback: ${finalError.message}. 请检查 API Key 余额或模型权限。` 
                  }] 
              });
         }
     }
 
-    // Cleaning formatting
+    // 清理 Markdown 代码块格式
     contentStr = contentStr.replace(/```json/g, "").replace(/```/g, "").trim();
     
     try {
         const comments = JSON.parse(contentStr);
         return corsResponse({ comments });
     } catch (parseError) {
-        // If JSON parsing fails, wrap the raw text
         return corsResponse({ 
             comments: [{ 
                 type: 'LANGUAGE', 
                 severity: 'INFO', 
-                position: 'AI 建议 (格式解析失败)', 
-                comment: contentStr 
+                position: 'AI解析警告', 
+                comment: `AI 返回了非标准 JSON，原始内容：${contentStr.substring(0, 100)}...` 
             }] 
         });
     }
 
   } catch (e) {
-    return corsResponse({ comments: [{ type: 'RISK', severity: 'WARNING', position: 'Global', comment: `Server Error: ${e.message}` }] });
+    return corsResponse({ error: `Server Error: ${e.message}` }, 500);
   }
 }
 
@@ -292,70 +258,35 @@ async function handleAIImpact(request) {
     try {
         const { prdContent } = await request.json();
         
-        const systemPrompt = `你是一个资深系统架构师。请分析产品需求文档(PRD)，构建一个“功能-系统模块”的影响面依赖图谱。
-        
-        返回格式必须是严格的JSON对象，不包含Markdown标记，结构如下：
-        {
-          "nodes": [
-            { "id": "功能或模块名", "group": 1(功能)或2(服务)或3(数据库), "val": 权重(5-20) }
-          ],
-          "links": [
-            { "source": "节点ID", "target": "节点ID" }
-          ]
-        }
-        请提取至少5-8个关键节点和对应的依赖关系。`;
-
-        let contentStr = "";
-        try {
-             contentStr = await callAI([
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `分析此PRD内容并生成图谱:\n${prdContent}` }
-            ], "deepseek-v3");
-        } catch (e) {
-             contentStr = await callAI([
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `分析此PRD内容并生成图谱:\n${prdContent}` }
-            ], "qwen-plus");
-        }
+        const systemPrompt = `生成影响面图谱 JSON。格式：{ "nodes": [{"id":"name", "group":1}], "links": [{"source":"id", "target":"id"}] }`;
+        let contentStr = await callAI([
+            { role: "system", content: systemPrompt },
+            { role: "user", content: prdContent.substring(0, 5000) }
+        ], "qwen-plus"); // 使用 qwen-plus 保证稳定性
 
         contentStr = contentStr.replace(/```json/g, "").replace(/```/g, "").trim();
         return corsResponse({ impactGraph: JSON.parse(contentStr) });
     } catch (e) {
-        return corsResponse({ error: "Graph Gen Failed: " + e.message }, 500);
+        return corsResponse({ error: e.message }, 500);
     }
-}
-
-async function handleRoomClose(request) {
-    const { roomId, userRole } = await request.json();
-    if (userRole !== 'OWNER') return corsResponse({ error: "Only Owner can close room" }, 403);
-    
-    let state = await getRoomState(roomId);
-    if (state) {
-        state.settings.isActive = false;
-        await saveRoomState(roomId, state);
-    }
-    return corsResponse({ success: true });
 }
 
 export default {
   async fetch(request) {
-    // Top-level error boundary to ensure JSON responses
     try {
         if (request.method === "OPTIONS") return corsResponse({}, 200);
-
         const url = new URL(request.url);
 
+        // 路由分发
         if (url.pathname === "/api/room/sync") return await handleRoomSync(request, url.href);
         if (url.pathname === "/api/room/update") return await handleRoomUpdate(request);
-        if (url.pathname === "/api/room/close") return await handleRoomClose(request);
         if (url.pathname === "/api/review") return await handleAIReview(request);
         if (url.pathname === "/api/impact") return await handleAIImpact(request);
         if (url.pathname === "/api/vote") return await handleVote(request);
 
         return new Response("Not Found", { status: 404 });
     } catch (err) {
-        console.error("Global Function Error:", err);
-        return corsResponse({ error: "Internal Server Error: " + err.message }, 500);
+        return corsResponse({ error: `Global Error: ${err.message}` }, 500);
     }
   },
 };
