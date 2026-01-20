@@ -28,12 +28,14 @@ export interface VoteData {
 
 export interface AIReviewComment {
     id: string;
-    type: 'LOGIC' | 'TECH' | 'RISK' | 'LANGUAGE';
-    severity: 'BLOCKER' | 'WARNING' | 'SUGGESTION';
+    type: 'LOGIC' | 'TECH' | 'RISK' | 'LANGUAGE' | 'HUMAN'; // Added HUMAN
+    severity: 'BLOCKER' | 'WARNING' | 'SUGGESTION' | 'INFO';
     position: string;
     originalText: string;
     comment: string;
     question?: string;
+    author?: string; // New: who wrote it
+    timestamp?: number;
 }
 
 export interface ImpactNode {
@@ -50,4 +52,22 @@ export interface ImpactLink {
 export interface ImpactData {
     nodes: ImpactNode[];
     links: ImpactLink[];
+}
+
+// New Types for Collaboration
+export type UserRole = 'OWNER' | 'GUEST';
+
+export interface RoomSettings {
+    allowGuestEdit: boolean;
+    allowGuestComment: boolean;
+    isActive: boolean;
+}
+
+export interface RoomState {
+    roomId: string;
+    content: string;
+    comments: AIReviewComment[];
+    settings: RoomSettings;
+    version: number;
+    lastUpdated: number;
 }
