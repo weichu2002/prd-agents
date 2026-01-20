@@ -138,6 +138,15 @@ function App() {
       setIsSyncing(true);
       try {
           const res = await fetch(`/api/room/sync?roomId=${id}`);
+          
+          // Helper: Check for HTML response (Local dev environment error)
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.includes("text/html")) {
+              // We are likely hitting local index.html instead of backend
+              // Silent fail in sync loop to avoid spamming console
+              return;
+          }
+
           const data = await res.json();
 
           if (data.exists && data.state) {
@@ -213,6 +222,11 @@ function App() {
               body: JSON.stringify({ roomId: rId, updates, userRole: uRole })
           });
           
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.includes("text/html")) {
+              throw new Error("Local Env: Backend not connected (Proxy missing?)");
+          }
+
           const data = await res.json();
           if (data.success && data.state) {
               // Immediate sync from write response
@@ -230,6 +244,8 @@ function App() {
               if (state.kbFiles) setKbFiles(state.kbFiles);
               if (state.impactGraph) setImpactGraph(state.impactGraph);
               if (state.settings) setRoomSettings(state.settings);
+          } else if (data.error) {
+              alert("保存失败: " + data.error);
           }
       } catch (e) {
           console.error("Push update failed", e);
@@ -258,6 +274,12 @@ function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ roomId, anchorKey, optionIndex: index, question, options })
           });
+          
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.includes("text/html")) {
+             throw new Error("请在部署环境测试，或检查本地代理配置。(Got HTML response)");
+          }
+
           const data = await res.json();
           if (data.success) {
               // Optimistic update
@@ -269,7 +291,7 @@ function App() {
           }
       } catch (e) {
           console.error("Vote network failed", e);
-          alert("网络错误");
+          alert(`网络错误: ${(e as Error).message}`);
       }
   };
 
@@ -283,12 +305,18 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prdContent: content, kbFiles: kbFiles })
       });
+      
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("text/html")) throw new Error("Backend unreachable (Local HTML response)");
+
       const data = await res.json();
+      
+      // Handle potential AI errors returned as comments
       const newComments = data.comments.map((c: any) => ({
-          ...c, id: uuidv4(), author: 'AI 评审副驾', timestamp: Date.now()
+          ...c, id: uuidv4(), author: c.position === '系统错误' ? '⚠️ 系统' : 'AI 评审副驾', timestamp: Date.now()
       }));
       
-      // Optimistic update (for immediate feedback)
+      // Optimistic update
       const merged = [...comments, ...newComments];
       setComments(merged);
       
@@ -297,7 +325,7 @@ function App() {
       
       setActiveTab('EDITOR');
     } catch (error) {
-      alert("AI 服务繁忙，请稍后重试");
+      alert(`AI 调用失败: ${(error as Error).message}`);
     } finally {
       setIsReviewing(false);
     }
@@ -313,6 +341,10 @@ function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ prdContent: content })
           });
+          
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.includes("text/html")) throw new Error("Backend unreachable");
+
           const data = await res.json();
           if (data.impactGraph) {
               setImpactGraph(data.impactGraph);
@@ -321,7 +353,7 @@ function App() {
               alert("分析失败: " + data.error);
           }
       } catch (e) {
-          alert("生成图谱失败");
+          alert("生成图谱失败: " + (e as Error).message);
       } finally {
           setIsGeneratingGraph(false);
       }

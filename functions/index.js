@@ -30,7 +30,7 @@ async function getRoomState(roomId) {
         const data = await kv.get(`room:${roomId}`, { type: "json" });
         return data;
     } catch (e) { 
-        console.warn("KV Get Error", e); 
+        console.warn("KV Get Error (Check if 'prd-kv' namespace exists in ESA console):", e); 
         return null;
     }
 }
@@ -41,7 +41,7 @@ async function saveRoomState(roomId, state) {
         const kv = new EdgeKV({ namespace: "prd-kv" });
         // Set TTL to 24 hours
         await kv.put(`room:${roomId}`, JSON.stringify(state), { expirationTtl: 86400 });
-    } catch (e) { console.warn("KV Save Error", e); }
+    } catch (e) { console.warn("KV Save Error:", e); }
     return state;
 }
 
@@ -49,9 +49,9 @@ async function saveRoomState(roomId, state) {
 async function callAI(messages, model = "deepseek-v3") {
     try {
         // DeepSeek V3 in DashScope might need specific parameters or fail on high load
-        // We set a timeout to fail fast
+        // Increased timeout to 60s for stability
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 25000); // Increased timeout to 25s
+        const timeoutId = setTimeout(() => controller.abort(), 60000); 
 
         const payload = {
             model: model,
@@ -73,10 +73,14 @@ async function callAI(messages, model = "deepseek-v3") {
 
         if (!response.ok) {
             const errText = await response.text();
-            throw new Error(`API Error: ${response.status} - ${errText}`);
+            console.error(`AI API Error (${model}): ${response.status} - ${errText}`);
+            throw new Error(`Cloud API Error: ${response.status} - ${errText}`);
         }
 
         const result = await response.json();
+        if (!result.choices || result.choices.length === 0) {
+             throw new Error("Empty response from AI provider");
+        }
         return result.choices[0].message.content;
     } catch (e) {
         console.warn(`AI Call Failed (${model}):`, e.message);
@@ -160,7 +164,8 @@ async function handleVote(request) {
         const { roomId, anchorKey, optionIndex, question, options } = body;
         
         let state = await getRoomState(roomId);
-        if (!state) return corsResponse({ error: "Room not found" }, 404);
+        // If KV is not configured, state might be null.
+        if (!state) return corsResponse({ error: "Room not found (Check if KV namespace 'prd-kv' is created in ESA)" }, 404);
 
         // Robust initialization
         if (!state.decisions) state.decisions = {};
@@ -191,7 +196,7 @@ async function handleVote(request) {
         return corsResponse({ success: true, decision: state.decisions[safeKey] });
     } catch (e) {
         console.error("Vote Handler Error:", e);
-        return corsResponse({ error: e.message }, 500);
+        return corsResponse({ error: "Vote failed: " + e.message }, 500);
     }
 }
 
@@ -226,6 +231,8 @@ async function handleAIReview(request) {
     }`;
 
     let contentStr = "";
+    let lastError = null;
+
     try {
         // Attempt 1: DeepSeek
         contentStr = await callAI([
@@ -233,7 +240,8 @@ async function handleAIReview(request) {
             { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
         ], "deepseek-v3");
     } catch (e) {
-        console.log("DeepSeek failed, falling back to Qwen-Plus");
+        console.warn("DeepSeek failed, falling back to Qwen-Plus. Error:", e.message);
+        lastError = e;
         // Attempt 2: Qwen Plus (Stable Fallback)
         try {
             contentStr = await callAI([
@@ -241,12 +249,17 @@ async function handleAIReview(request) {
                 { role: "user", content: `请审查以下PRD片段:\n${prdContent}` }
             ], "qwen-plus");
         } catch (finalError) {
+             // Return the actual error to the user for debugging
+             const errMsg = finalError.message.includes("401") ? "API Key 无效或过期" : 
+                            finalError.message.includes("404") ? "模型名称错误 (DeepSeek/Qwen)" : 
+                            finalError.message;
+             
              return corsResponse({ 
                  comments: [{ 
                      type: 'RISK', 
                      severity: 'WARNING', 
-                     position: '系统消息', 
-                     comment: `AI 服务暂时拥堵，请稍后重试。` 
+                     position: '系统错误', 
+                     comment: `AI 服务调用失败: ${errMsg} (Primary Error: ${lastError?.message})` 
                  }] 
              });
         }
@@ -264,7 +277,7 @@ async function handleAIReview(request) {
             comments: [{ 
                 type: 'LANGUAGE', 
                 severity: 'INFO', 
-                position: 'AI 建议', 
+                position: 'AI 建议 (格式解析失败)', 
                 comment: contentStr 
             }] 
         });
@@ -326,17 +339,23 @@ async function handleRoomClose(request) {
 
 export default {
   async fetch(request) {
-    if (request.method === "OPTIONS") return corsResponse({}, 200);
+    // Top-level error boundary to ensure JSON responses
+    try {
+        if (request.method === "OPTIONS") return corsResponse({}, 200);
 
-    const url = new URL(request.url);
+        const url = new URL(request.url);
 
-    if (url.pathname === "/api/room/sync") return handleRoomSync(request, url.href);
-    if (url.pathname === "/api/room/update") return handleRoomUpdate(request);
-    if (url.pathname === "/api/room/close") return handleRoomClose(request);
-    if (url.pathname === "/api/review") return handleAIReview(request);
-    if (url.pathname === "/api/impact") return handleAIImpact(request);
-    if (url.pathname === "/api/vote") return handleVote(request);
+        if (url.pathname === "/api/room/sync") return await handleRoomSync(request, url.href);
+        if (url.pathname === "/api/room/update") return await handleRoomUpdate(request);
+        if (url.pathname === "/api/room/close") return await handleRoomClose(request);
+        if (url.pathname === "/api/review") return await handleAIReview(request);
+        if (url.pathname === "/api/impact") return await handleAIImpact(request);
+        if (url.pathname === "/api/vote") return await handleVote(request);
 
-    return new Response("Not Found", { status: 404 });
+        return new Response("Not Found", { status: 404 });
+    } catch (err) {
+        console.error("Global Function Error:", err);
+        return corsResponse({ error: "Internal Server Error: " + err.message }, 500);
+    }
   },
 };
