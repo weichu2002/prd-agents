@@ -1,13 +1,29 @@
-import React from 'react';
-import { Bot, Users, Zap, ArrowRight, ShieldCheck, Sparkles } from 'lucide-react';
+import React, { useState } from 'react';
+import { Bot, Users, Zap, ArrowRight, ShieldCheck, Sparkles, Settings, Lock, Unlock } from 'lucide-react';
+import { RoomSettings } from '../types';
 
 interface Props {
-    onCreate: () => void;
+    onCreate: (settings: RoomSettings) => void;
     onJoin: (id: string) => void;
 }
 
 export const LandingPage: React.FC<Props> = ({ onCreate, onJoin }) => {
-    const [joinId, setJoinId] = React.useState('');
+    const [joinId, setJoinId] = useState('');
+    const [isCreating, setIsCreating] = useState(false);
+    const [settings, setSettings] = useState<RoomSettings>({
+        allowGuestEdit: false,
+        allowGuestComment: true,
+        isActive: true,
+        status: 'DRAFT'
+    });
+
+    const handleCreateClick = () => {
+        setIsCreating(true);
+    };
+
+    const confirmCreate = () => {
+        onCreate(settings);
+    };
 
     return (
         <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-gray-900">
@@ -20,9 +36,7 @@ export const LandingPage: React.FC<Props> = ({ onCreate, onJoin }) => {
                     <span className="font-bold text-xl tracking-tight text-slate-900">PRD-Agents</span>
                 </div>
                 <div className="flex items-center gap-4 text-sm font-medium text-gray-600">
-                    <a href="#" className="hover:text-aliyun">解决方案</a>
-                    <a href="#" className="hover:text-aliyun">企业版</a>
-                    <a href="#" className="hover:text-aliyun">文档</a>
+                    <span className="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded">v1.2.0</span>
                 </div>
             </nav>
 
@@ -38,25 +52,58 @@ export const LandingPage: React.FC<Props> = ({ onCreate, onJoin }) => {
                     PRD-Agents 是下一代产品协作平台。集成 DeepSeek AI 评审、实时团队共识投票与边缘实时同步，让产品决策有据可依。
                 </p>
 
-                <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
-                    <button 
-                        onClick={onCreate}
-                        className="flex-1 flex items-center justify-center gap-2 bg-slate-900 text-white px-8 py-4 rounded-xl hover:bg-slate-800 transition-all shadow-lg hover:shadow-xl font-bold text-lg group"
-                    >
-                        <Sparkles className="w-5 h-5 text-yellow-400 group-hover:animate-pulse" />
-                        创建新项目
-                    </button>
-                    <div className="flex-1 flex gap-2">
+                <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md items-start">
+                    {!isCreating ? (
+                        <button 
+                            onClick={handleCreateClick}
+                            className="w-full sm:w-auto flex-1 flex items-center justify-center gap-2 bg-slate-900 text-white px-8 py-4 rounded-xl hover:bg-slate-800 transition-all shadow-lg hover:shadow-xl font-bold text-lg group h-[52px]"
+                        >
+                            <Sparkles className="w-5 h-5 text-yellow-400 group-hover:animate-pulse" />
+                            创建新项目
+                        </button>
+                    ) : (
+                        <div className="w-full bg-white p-4 rounded-xl shadow-xl border border-gray-200 text-left animate-in fade-in zoom-in-95">
+                            <h3 className="font-bold text-gray-800 mb-3 flex items-center gap-2">
+                                <Settings className="w-4 h-4" /> 初始化房间权限
+                            </h3>
+                            <div className="space-y-3 mb-4">
+                                <label className="flex items-center justify-between text-sm cursor-pointer hover:bg-gray-50 p-2 rounded">
+                                    <span className="text-gray-600">允许访客编辑文档</span>
+                                    <div 
+                                        onClick={() => setSettings(s => ({...s, allowGuestEdit: !s.allowGuestEdit}))}
+                                        className={`w-10 h-5 rounded-full relative transition-colors ${settings.allowGuestEdit ? 'bg-green-500' : 'bg-gray-300'}`}
+                                    >
+                                        <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${settings.allowGuestEdit ? 'left-5.5' : 'left-0.5'}`} />
+                                    </div>
+                                </label>
+                                <label className="flex items-center justify-between text-sm cursor-pointer hover:bg-gray-50 p-2 rounded">
+                                    <span className="text-gray-600">允许访客发表评论</span>
+                                    <div 
+                                        onClick={() => setSettings(s => ({...s, allowGuestComment: !s.allowGuestComment}))}
+                                        className={`w-10 h-5 rounded-full relative transition-colors ${settings.allowGuestComment ? 'bg-green-500' : 'bg-gray-300'}`}
+                                    >
+                                        <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${settings.allowGuestComment ? 'left-5.5' : 'left-0.5'}`} />
+                                    </div>
+                                </label>
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={() => setIsCreating(false)} className="flex-1 py-2 text-sm text-gray-500 hover:bg-gray-100 rounded-lg">取消</button>
+                                <button onClick={confirmCreate} className="flex-1 py-2 text-sm bg-aliyun text-white rounded-lg font-bold hover:bg-aliyun-dark">立即创建</button>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="flex-1 flex gap-2 w-full sm:w-auto h-[52px]">
                          <input 
                             type="text" 
                             placeholder="输入房间号..."
                             value={joinId}
                             onChange={(e) => setJoinId(e.target.value)}
-                            className="w-full px-4 py-3 rounded-xl border border-gray-300 focus:outline-none focus:border-aliyun focus:ring-2 focus:ring-aliyun/20 bg-white"
+                            className="w-full px-4 rounded-xl border border-gray-300 focus:outline-none focus:border-aliyun focus:ring-2 focus:ring-aliyun/20 bg-white h-full"
                          />
                          <button 
                             onClick={() => joinId && onJoin(joinId)}
-                            className="bg-white border border-gray-300 text-gray-700 px-4 rounded-xl hover:bg-gray-50 transition-colors"
+                            className="bg-white border border-gray-300 text-gray-700 px-4 rounded-xl hover:bg-gray-50 transition-colors h-full"
                          >
                             <ArrowRight className="w-5 h-5" />
                          </button>
@@ -70,21 +117,21 @@ export const LandingPage: React.FC<Props> = ({ onCreate, onJoin }) => {
                             <Bot className="w-6 h-6 text-blue-600" />
                         </div>
                         <h3 className="font-bold text-lg mb-2">AI 评审副驾</h3>
-                        <p className="text-gray-500 text-sm">内置 DeepSeek 大模型，结合企业知识库（RAG），自动审查 PRD 逻辑漏洞与技术风险。</p>
+                        <p className="text-gray-500 text-sm">内置 DeepSeek 大模型，自动审查 PRD 逻辑漏洞与技术风险。</p>
                     </div>
                     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
                          <div className="w-12 h-12 bg-green-50 rounded-xl flex items-center justify-center mb-4">
                             <Users className="w-6 h-6 text-green-600" />
                         </div>
                         <h3 className="font-bold text-lg mb-2">团队决策共识</h3>
-                        <p className="text-gray-500 text-sm">识别文档中的决策锚点，一键发起团队投票，生成共识热力图，避免无效扯皮。</p>
+                        <p className="text-gray-500 text-sm">识别文档中的决策锚点，一键发起团队投票，生成共识热力图。</p>
                     </div>
                      <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
                          <div className="w-12 h-12 bg-purple-50 rounded-xl flex items-center justify-center mb-4">
                             <ShieldCheck className="w-6 h-6 text-purple-600" />
                         </div>
                         <h3 className="font-bold text-lg mb-2">边缘安全协作</h3>
-                        <p className="text-gray-500 text-sm">基于阿里云 ESA 边缘节点部署，数据就近存储，毫秒级同步，支持精细化权限管理。</p>
+                        <p className="text-gray-500 text-sm">基于阿里云 ESA 边缘节点部署，数据就近存储，毫秒级同步。</p>
                     </div>
                 </div>
             </main>

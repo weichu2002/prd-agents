@@ -69,7 +69,8 @@ async function handleRoomUpdate(request) {
             roomId,
             content: updates.content || "",
             comments: [],
-            settings: { allowGuestEdit: false, allowGuestComment: false, isActive: true },
+            kbFiles: updates.kbFiles || [],
+            settings: { allowGuestEdit: false, allowGuestComment: false, isActive: true, status: 'DRAFT' },
             version: 1,
             lastUpdated: Date.now()
         };
@@ -81,8 +82,8 @@ async function handleRoomUpdate(request) {
     }
 
     if (updates.content !== undefined) state.content = updates.content;
-    // Append or merge comments logic could be smarter, but simple replacement for now
     if (updates.comments !== undefined) state.comments = updates.comments;
+    if (updates.kbFiles !== undefined) state.kbFiles = updates.kbFiles; // Sync KB files
     if (updates.settings !== undefined && userRole === 'OWNER') state.settings = { ...state.settings, ...updates.settings };
     
     state.version++;
@@ -92,18 +93,28 @@ async function handleRoomUpdate(request) {
 
 async function handleAIReview(request) {
   try {
-    const { prdContent, kbFiles } = await request.json(); // Accept KB context
+    const { prdContent, kbFiles } = await request.json(); 
 
-    // Construct a context-aware system prompt
-    const kbContext = kbFiles && kbFiles.length > 0 
-        ? `\n\n已加载的企业知识库规范：\n${kbFiles.map(f => `- ${f.name}`).join('\n')}\n请确保评审意见引用上述规范（如存在冲突）。` 
-        : "";
+    // Construct context from REAL uploaded files
+    // Limit context size to avoid token overflow (simple truncation strategy)
+    const MAX_KB_LENGTH = 10000; 
+    let kbContext = "";
+    
+    if (kbFiles && kbFiles.length > 0) {
+        kbContext = `\n\n【已加载的企业知识库】：\n`;
+        for (const file of kbFiles) {
+            // Take first 2000 chars of each file to save tokens, assuming key info is at top or files are small
+            const snippet = file.content ? file.content.substring(0, 2000) : ""; 
+            kbContext += `\n--- 文档: ${file.name} ---\n${snippet}\n----------------\n`;
+        }
+        kbContext += `\n请严格依据上述知识库内容对PRD进行一致性审查。如果PRD内容违背了上述文档中的规范，必须在评论中指出违背了哪个文档的哪条规则。`;
+    }
 
     const systemPrompt = `你是一位来自顶尖科技公司的首席产品架构师。深度审查PRD文档。${kbContext}
     
     核心原则：
     1. 逻辑完备性：检查是否缺失成功指标、异常流程。
-    2. 技术一致性：检查是否符合通常的技术架构标准。
+    2. 技术一致性：检查是否符合通常的技术架构标准或知识库中的规范。
     3. 风险识别：识别安全、性能、合规风险。
     
     输出格式为严格的JSON数组，不包含Markdown格式标记，每个对象包含：
@@ -143,9 +154,8 @@ async function handleAIReview(request) {
 
   } catch (e) {
     console.error(e);
-    // Mock response for fallback
     const mockComments = [
-        { type: 'RISK', severity: 'BLOCKER', position: '3.1', originalText: '面部驱动', comment: 'AI服务响应超时，使用Mock数据: 未定义隐私协议。' }
+        { type: 'RISK', severity: 'WARNING', position: 'Global', originalText: '系统错误', comment: `AI 服务暂时不可用: ${e.message}` }
     ];
     return corsResponse({ comments: mockComments });
   }

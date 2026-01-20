@@ -1,3 +1,4 @@
+
 export interface Project {
     id: string;
     name: string;
@@ -28,13 +29,13 @@ export interface VoteData {
 
 export interface AIReviewComment {
     id: string;
-    type: 'LOGIC' | 'TECH' | 'RISK' | 'LANGUAGE' | 'HUMAN'; // Added HUMAN
+    type: 'LOGIC' | 'TECH' | 'RISK' | 'LANGUAGE' | 'HUMAN';
     severity: 'BLOCKER' | 'WARNING' | 'SUGGESTION' | 'INFO';
     position: string;
     originalText: string;
     comment: string;
     question?: string;
-    author?: string; // New: who wrote it
+    author?: string;
     timestamp?: number;
 }
 
@@ -57,10 +58,23 @@ export interface ImpactData {
 // New Types for Collaboration
 export type UserRole = 'OWNER' | 'GUEST';
 
+// New: Document Status
+export type ProjectStatus = 'DRAFT' | 'REVIEW' | 'APPROVED';
+
 export interface RoomSettings {
     allowGuestEdit: boolean;
     allowGuestComment: boolean;
     isActive: boolean;
+    status: ProjectStatus; // Added status
+}
+
+// New: Real Knowledge Base Document
+export interface KBDocument {
+    id: string;
+    name: string;
+    content: string; // Extracted text content
+    size: number;
+    uploadedAt: number;
 }
 
 export interface RoomState {
@@ -68,6 +82,7 @@ export interface RoomState {
     content: string;
     comments: AIReviewComment[];
     settings: RoomSettings;
+    kbFiles: KBDocument[]; // Changed from static list to dynamic objects
     version: number;
     lastUpdated: number;
 }
